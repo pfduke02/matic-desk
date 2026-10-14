@@ -1,0 +1,145 @@
+"""Decode the robot's authoritative mapped-floor mission state."""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+
+from google.protobuf.message import DecodeError
+
+from .models import MappedFloor
+from .slam_map import decode_slam_mission_id
+from .wire import WireField, decode_fields
+
+MAX_MAPPED_FLOORS = 64
+MAX_FLOOR_LABEL_BYTES = 256
+MAX_FLOOR_LABEL_CHARACTERS = 128
+MAX_MISSION_CLIENT_STATE_BYTES = 256 * 1024
+MAX_MISSION_MESSAGE_FIELDS = 256
+MAX_MISSION_IDENTITY_BYTES = 64
+
+
+@dataclass(frozen=True, slots=True)
+class MissionClientState:
+    """Live active mission plus the robot's canonical labeled floors."""
+
+    active_floor: MappedFloor | None
+    mapped_floors: tuple[MappedFloor, ...]
+
+
+def decode_mission_client_state(payload: bytes) -> MissionClientState:
+    """Decode the verified ``displayed_mission`` mission-client record.
+
+    Current firmware publishes the active labeled mission under root field 5,
+    variant 4, and the complete canonical labeled-mission set under root field
+    6. The decoder intentionally accepts only that observed active variant and
+    unambiguous labeled-mission fields; another variant leaves the active floor
+    unknown so callers fail closed instead of guessing.
+    """
+    if len(payload) > MAX_MISSION_CLIENT_STATE_BYTES:
+        raise DecodeError("mission client state exceeds its byte limit")
+    fields = _decode_bounded_fields(payload)
+    active_values = _bytes_values(fields, 5)
+    canonical_values = _bytes_values(fields, 6)
+    if len(active_values) > 1 or len(canonical_values) != 1:
+        raise DecodeError("mission client state has an invalid root shape")
+
+    canonical_entries = _bytes_values(_decode_bounded_fields(canonical_values[0]), 1)
+    if not canonical_entries or len(canonical_entries) > MAX_MAPPED_FLOORS:
+        raise DecodeError("mission client state has an invalid floor count")
+    labeled_floors = tuple(
+        _decode_labeled_mission(value) for value in canonical_entries
+    )
+    mapped_floors = tuple(floor for floor, _label_type in labeled_floors)
+    by_id = {
+        floor.mission_id: (floor, label_type) for floor, label_type in labeled_floors
+    }
+    if len(by_id) != len(mapped_floors):
+        raise DecodeError("mission client state repeats a floor identity")
+
+    active_floor: MappedFloor | None = None
+    if active_values:
+        active_fields = _decode_bounded_fields(active_values[0])
+        if (
+            len(active_fields) == 1
+            and active_fields[0].number == 4
+            and active_fields[0].wire_type == 2
+            and isinstance(active_fields[0].value, bytes)
+        ):
+            decoded_active = _decode_labeled_mission(active_fields[0].value)
+            canonical = by_id.get(decoded_active[0].mission_id)
+            if canonical is None or canonical != decoded_active:
+                raise DecodeError(
+                    "active mission does not match the canonical floor list"
+                )
+            active_floor = canonical[0]
+
+    return MissionClientState(active_floor, mapped_floors)
+
+
+def _decode_labeled_mission(payload: bytes) -> tuple[MappedFloor, int | None]:
+    try:
+        fields = _decode_bounded_fields(payload)
+    except DecodeError as err:
+        if "field limit" in str(err):
+            raise DecodeError("labeled mission exceeds its field limit") from err
+        raise DecodeError("labeled mission has an invalid shape") from err
+    mission_values = _bytes_values(fields, 1)
+    label_values = _bytes_values(fields, 2)
+    known_fields = tuple(field for field in fields if field.number in (1, 2))
+    if len(known_fields) != 2 or len(mission_values) != 1 or len(label_values) != 1:
+        raise DecodeError("labeled mission has an invalid shape")
+    mission = mission_values[0]
+    if len(mission) > MAX_MISSION_IDENTITY_BYTES:
+        raise DecodeError("labeled mission has an invalid identity")
+    mission_id = decode_slam_mission_id(mission)
+    if mission_id is None:
+        raise DecodeError("labeled mission has an invalid identity")
+    label, label_type = _decode_floor_label(label_values[0])
+    return MappedFloor(
+        mission_id, label, hashlib.sha256(mission).hexdigest()
+    ), label_type
+
+
+def _decode_floor_label(payload: bytes) -> tuple[str, int | None]:
+    fields = _decode_bounded_fields(payload)
+    known_fields = tuple(field for field in fields if field.number in (1, 2))
+    if len(known_fields) != 1:
+        raise DecodeError("floor label has an invalid shape")
+    field = known_fields[0]
+    if field.number == 1 and field.wire_type == 0 and isinstance(field.value, int):
+        # The numeric label's meaning is unknown. Preserve its discriminator for
+        # active/canonical agreement, but never use it as a floor identity.
+        return "Floor", field.value
+    values = _bytes_values(fields, 2)
+    if len(values) != 1:
+        raise DecodeError("floor label has an invalid shape")
+    encoded = values[0]
+    if not encoded or len(encoded) > MAX_FLOOR_LABEL_BYTES:
+        raise DecodeError("floor label exceeds its byte bounds")
+    try:
+        label = encoded.decode("utf-8").strip()
+    except UnicodeDecodeError as err:
+        raise DecodeError("floor label is not valid UTF-8") from err
+    if (
+        not label
+        or len(label) > MAX_FLOOR_LABEL_CHARACTERS
+        or any(not character.isprintable() for character in label)
+    ):
+        raise DecodeError("floor label is not safe to display")
+    return label, None
+
+
+def _bytes_values(fields: tuple[WireField, ...], number: int) -> tuple[bytes, ...]:
+    return tuple(
+        field.value
+        for field in fields
+        if field.number == number
+        and field.wire_type == 2
+        and isinstance(field.value, bytes)
+    )
+
+
+def _decode_bounded_fields(payload: bytes) -> tuple[WireField, ...]:
+    """Decode one mission message without allowing field amplification."""
+    return decode_fields(payload, max_fields=MAX_MISSION_MESSAGE_FIELDS)

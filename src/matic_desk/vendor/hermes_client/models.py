@@ -1,0 +1,386 @@
+"""Typed client models."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+
+
+@dataclass(frozen=True, slots=True)
+class RobotInfo:
+    """Identity and connection metadata returned by a Matic robot."""
+
+    serial_number: str
+    name: str
+    hostname: str
+    port: int
+    ip4_address: str
+    ip6_address: str
+    encrypted: bool
+    requires_auth: bool
+    network_auth: bool
+    hardware_revision: str
+
+
+class RobotActivity(StrEnum):
+    """Stable high-level activity derived from verified Hermes states."""
+
+    ERROR = "error"
+    PAUSED = "paused"
+    CLEANING = "cleaning"
+    RETURNING = "returning"
+    CHARGING = "charging"
+    DOCKED = "docked"
+    READY = "ready"
+
+
+class CuesVoiceStatus(StrEnum):
+    """Privacy-safe Matic Cues voice lifecycle reported by the robot."""
+
+    DISABLED = "disabled"
+    LISTENING_FOR_WAKE_WORD = "listening_for_wake_word"
+    LISTENING_FOR_INTENT = "listening_for_intent"
+    THINKING_FOR_INTENT = "thinking_for_intent"
+    CLASSIFIED = "classified"
+    REJECTED = "rejected"
+
+
+class CuesGestureStatus(StrEnum):
+    """Privacy-safe Matic Cues gesture lifecycle reported by the robot."""
+
+    AWAITING_POINTED_TARGET = "awaiting_pointed_target"
+    POINTED_TARGET_ACCEPTED = "pointed_target_accepted"
+    NO_TARGET_FOUND = "no_target_found"
+    FACING_USER = "facing_user"
+    PERSON_NOT_FOUND = "person_not_found"
+    FOLLOWING = "following"
+
+
+class CuesIntent(StrEnum):
+    """Automation-safe intent classifications exposed by Matic Cues."""
+
+    CLEAN = "clean"
+    CLEAN_ALL = "clean_all"
+    DOCK = "dock"
+    GO_AWAY = "go_away"
+    NAVIGATE = "navigate"
+    PAUSE = "pause"
+    REDO_LAST_CLEAN = "redo_last_clean"
+    RESUME = "resume"
+    SINK_SUMMON = "sink_summon"
+    STOP = "stop"
+    FOLLOW_PERSON = "follow_person"
+    POINT_TO_CLEAN = "point_to_clean"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class RobotOperationalState:
+    """Verified fields from the local ``kabuki_state`` property."""
+
+    battery_percentage: int | None
+    state_codes: tuple[int, ...]
+    error_codes: tuple[int, ...]
+    charging_idle: bool
+    charging: bool
+    low_charge: bool
+    paused: bool
+    cleaning: bool
+    returning: bool
+    software_version: str | None = None
+    release_channel: str | None = None
+    current_area: str | None = None
+    previous_area: str | None = None
+    robot_profile: str | None = None
+    cues_voice_status: CuesVoiceStatus | None = None
+    cues_voice_intent: CuesIntent | None = None
+    cues_gesture_status: CuesGestureStatus | None = None
+    following_person: bool | None = None
+    bag_full: bool | None = None
+    bag_missing: bool | None = None
+
+    @property
+    def activity(self) -> RobotActivity:
+        """Return a conservative high-level state without inventing semantics."""
+        # Pausing is an explicit user or robot action and outranks the dock and a
+        # latched warning: an error code beside a retained task or on the dock
+        # (see below), which stays visible through ``error_codes`` / ``problem``.
+        # A paused robot with an error code and neither is stopped by a real
+        # error, and reports ``ERROR``.
+        if self.paused and (self.cleaning or self.is_charging or not self.error_codes):
+            return RobotActivity.PAUSED
+        if self.returning:
+            return RobotActivity.RETURNING
+        # Firmware can retain task and warning flags while the robot is
+        # physically docked, both during recharge-and-resume and ordinary
+        # charging.  Unless the robot is paused or returning (checked above),
+        # physical charging wins as the HA vacuum activity; raw warning
+        # evidence remains available through ``error_codes``.
+        if self.charging:
+            return RobotActivity.CHARGING
+        if self.charging_idle:
+            return RobotActivity.DOCKED
+        # Firmware can retain a non-blocking warning code while it continues an
+        # accepted cleaning mission.  The active task is the primary HA vacuum
+        # activity; ``error_codes`` remains exposed separately as ``problem``.
+        if self.cleaning:
+            return RobotActivity.CLEANING
+        if self.error_codes:
+            return RobotActivity.ERROR
+        return RobotActivity.READY
+
+    @property
+    def recharge_and_resume(self) -> bool:
+        """Return whether a low-charge cleaning task is suspended at the dock."""
+        return self.low_charge and self.cleaning and self.is_charging
+
+    def native_session_activity(self, *, identity_cleared: bool = False) -> bool | None:
+        """Separate native task evidence from the public physical activity.
+
+        An opaque error cannot prove a retained task ended. ``identity_cleared``
+        requires the vetted active-session property to explicitly be empty;
+        it does not classify the error or override the robot's command checks.
+        """
+        if self.returning:
+            return None
+        if self.cleaning or self.paused:
+            return True
+        if self.is_charging:
+            return False if not self.error_codes or identity_cleared else None
+        if not self.error_codes and (not self.state_codes or identity_cleared):
+            return False
+        return None
+
+    @property
+    def is_charging(self) -> bool:
+        """Return whether the robot is docked and charging or charge-idle."""
+        return self.charging or self.charging_idle
+
+    @property
+    def is_fully_charged(self) -> bool:
+        """Return the official fully-charged battery predicate."""
+        return self.battery_percentage == 100 and self.is_charging
+
+    @property
+    def error_names(self) -> tuple[str, ...]:
+        """Return truthful automation-safe labels for raw robot error codes.
+
+        The app's public enum ordering is not the numeric Hermes wire mapping;
+        live firmware uses values such as 207 and 304. Preserve those values
+        without guessing a human meaning until a numeric mapping is verified.
+        """
+        return tuple(f"error_code_{code}" for code in self.error_codes)
+
+
+@dataclass(frozen=True, slots=True)
+class RobotTelemetry:
+    """Decoded local settings, software, schedules, history, and diagnostics."""
+
+    software_version: str | None = None
+    software_profile: str | None = None
+    protocol_version: int | None = None
+    supports_easter_event: bool | None = None
+    update_channel: str | None = None
+    update_state: str | None = None
+    wifi_state: str | None = None
+    wifi_ssid: str | None = None
+    wifi_signal_dbm: int | None = None
+    wifi_networks: tuple[WifiNetwork, ...] = ()
+    timezone: str | None = None
+    scheduled_cleanings: int | None = None
+    schedules: tuple[CleaningSchedule, ...] = ()
+    local_cleaning_sessions: int | None = None
+    latest_session: CleaningSession | None = None
+    child_lock_enabled: bool | None = None
+    pet_waste_enabled: bool | None = None
+    voice_enabled: bool | None = None
+    matter_pairing_enabled: bool | None = None
+    deep_mop_enabled: bool | None = None
+    water_flow_factor: float | None = None
+    ssh_tunnel_permission: bool | None = None
+    uploader_opt_in: bool | None = None
+    active_cleaning_session: bool | None = None
+    dock_detections: int | None = None
+    sink_summon_locations: int | None = None
+    coverage_time_seconds: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WifiNetwork:
+    """One network reported by the robot's local Wi-Fi scan."""
+
+    ssid: str
+    signal_dbm: int | None
+    connected: bool
+    known: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CleaningSchedule:
+    """One locally stored cleaning schedule."""
+
+    name: str | None
+    weekdays: tuple[str, ...]
+    minute_of_day: int | None
+    timezone: str | None
+    ordered: bool
+    enabled: bool | None
+    room_ids: tuple[str, ...]
+
+    @property
+    def time(self) -> str | None:
+        """Return the schedule wall-clock time."""
+        if self.minute_of_day is None:
+            return None
+        hours, minutes = divmod(self.minute_of_day, 60)
+        return f"{hours:02d}:{minutes:02d}"
+
+
+@dataclass(frozen=True, slots=True)
+class CleaningModeResult:
+    """One room's native result for one cleaning mode."""
+
+    room: str
+    cleaning_mode: str
+    status: str | None
+    duration_seconds: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class CleaningSession:
+    """One session's room scope, visited rooms, and native mode outcomes."""
+
+    started_at: str | None
+    ended_at: str | None
+    duration_seconds: int | None
+    rooms: tuple[str, ...]
+    room_durations: tuple[tuple[str, int], ...]
+    completed: bool | None
+    completed_rooms: tuple[str, ...] = ()
+    vacuum_completed_rooms: tuple[str, ...] = ()
+    mop_completed_rooms: tuple[str, ...] = ()
+    combined_completed_rooms: tuple[str, ...] = ()
+    mode_results: tuple[CleaningModeResult, ...] = ()
+
+    @property
+    def visited_rooms(self) -> tuple[str, ...]:
+        """Keep requested but unattempted native rooms out of activity outputs."""
+        if not self.mode_results:
+            return self.rooms
+        visited = {
+            result.room
+            for result in self.mode_results
+            if result.status in ("partial", "completed")
+        }
+        return tuple(name for name in self.rooms if name in visited)
+
+    def completed_rooms_for_mode(self, mode: str | None) -> tuple[str, ...]:
+        """Require explicit evidence for every mode in a native dispatch."""
+        if self.mode_results:
+            return {
+                "vacuum": self.vacuum_completed_rooms,
+                "mop": self.mop_completed_rooms,
+                "vacuum_and_mop": self.combined_completed_rooms,
+            }.get(mode or "", ())
+        # Locally tracked sessions predate native per-mode evidence.
+        if mode == "vacuum" and self.vacuum_completed_rooms:
+            return self.vacuum_completed_rooms
+        return self.completed_rooms
+
+    def room_durations_for_mode(self, mode: str | None) -> tuple[tuple[str, int], ...]:
+        """Sum only the requested native modes, retaining tracked-session data."""
+        if not self.mode_results:
+            return self.room_durations
+        durations: dict[str, int | None] = {}
+        for result in self.mode_results:
+            if mode not in (result.cleaning_mode, "vacuum_and_mop"):
+                continue
+            previous = durations.get(result.room, 0)
+            duration = result.duration_seconds
+            # A second mode must not conceal a missing or unusable duration.
+            durations[result.room] = (
+                previous + duration
+                if previous is not None and duration is not None and duration > 0
+                else None
+            )
+        return tuple(
+            (name, value) for name, value in durations.items() if value is not None
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CleaningSessionRecord:
+    """One opaque native history key and its decoded session summary."""
+
+    key: bytes
+    session: CleaningSession
+
+
+@dataclass(frozen=True, slots=True)
+class HermesCollectionEntry:
+    """One raw Hermes collection entry and its private version sequence."""
+
+    key: bytes
+    value: bytes
+    sequence_start_ns: int | None = field(default=None, compare=False)
+    sequence_no: int | None = field(default=None, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RobotState:
+    """Latest coordinated state."""
+
+    info: RobotInfo
+    operational: RobotOperationalState
+    floor_plan: FloorPlan | None = None
+    pose: RobotPose | None = None
+    telemetry: RobotTelemetry = field(default_factory=RobotTelemetry)
+
+
+@dataclass(frozen=True, slots=True)
+class Room:
+    """A named room from the robot's local coverage plan."""
+
+    id: str
+    name: str
+    protocol_id: str
+    id_wire: bytes
+    boundary: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MappedFloor:
+    """One robot-owned floor identity and its customer-facing label."""
+
+    mission_id: int
+    label: str
+    mission_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class FloorPlan:
+    """The active mission's standard partition."""
+
+    mission_id: int
+    partition_protocol_id: str
+    partition_id_wire: bytes
+    rooms: tuple[Room, ...]
+    floor_label: str | None = None
+    mapped_floors: tuple[MappedFloor, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RobotPose:
+    """Latest robot translation in map coordinates."""
+
+    x: float
+    y: float
+    z: float
+
+
+@dataclass(frozen=True, slots=True)
+class RobotTrajectory:
+    """Mission-scoped approximate route reported by the robot."""
+
+    mission_id: int
+    points: tuple[tuple[float, float], ...]

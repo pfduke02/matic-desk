@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+.pytest_cache/
+*.sqlite
+*.sqlite-*
+robot.json
+.DS_Store
+# `matic-desk map --out ...` output shows a home's floor plan
+matic-map*.png
+.env
+.claude/settings.local.json

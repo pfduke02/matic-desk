@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.pfduke02.maticdesk</string>
+	<key>CFBundleName</key>
+	<string>Matic Desk</string>
+	<key>CFBundleDisplayName</key>
+	<string>Matic Desk</string>
+	<key>CFBundleExecutable</key>
+	<string>MaticDesk</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Matic Desk talks directly to your Matic robot on your home network to show its status and send cleaning commands. Nothing is sent to the internet.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_matic_hermes._tcp</string>
+	</array>
+	<!-- Filled in by app/build.sh with absolute paths for this machine. -->
+	<key>MDBackendExecutable</key>
+	<string></string>
+	<key>MDBackendArguments</key>
+	<array>
+		<string>-m</string>
+		<string>matic_desk.bridge</string>
+	</array>
+	<key>MDBackendWorkingDirectory</key>
+	<string></string>
+</dict>
+</plist>
